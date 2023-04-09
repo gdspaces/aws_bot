@@ -1,0 +1,170 @@
+import json
+import openai
+import boto3
+import uuid
+import datetime as DT
+
+client = boto3.client('dynamodb')
+today = DT.date.today()
+
+def generate_response_chatgpt(prompt):
+    # Use the OpenAI API to generate a response to the prompt
+    response = openai.Completion.create(
+        engine="text-davinci-003",
+        prompt=prompt,
+        max_tokens=1024,
+        temperature=0,
+        top_p=1,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+    )
+    # Extract the generated text from the response
+    generated_text = response["choices"][0]["text"]
+    # Return the generated 
+    print(generated_text)
+    return generated_text
+
+# Use the OpenAI API key
+openai.api_key = "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"
+
+def generate_response(session_attributes, intent_name, fulfillment_state, message,type):
+    response = {
+        'messages': [
+            message
+        ],
+        'sessionState': {
+            'dialogAction': {
+                'type': type           
+            },
+            'sessionAttributes': session_attributes,
+            'intent': {
+                'name': intent_name,
+                'state': fulfillment_state
+            }
+        }
+    }
+
+    return response
+
+
+def reply_close(req,text):
+    return generate_response(req['sessionState']['sessionAttributes'],
+                 req['sessionState']['intent']['name'],
+                 'Fulfilled ',
+                 {'contentType': 'PlainText',
+                  'content': text},'Close')
+
+
+def reply_delegate(req,text):
+    return generate_response(req['sessionState']['sessionAttributes'],
+                 req['sessionState']['intent']['name'],
+                 'ReadyForFulfillment',
+                 {'contentType': 'PlainText',
+                  'content': text},'Delegate')
+
+def execute(req):
+    
+    print(req['sessionState']['intent'])
+    intent= req['sessionState']['intent']['name']
+
+    if intent == 'FallbackIntent':
+        return reply_close(req,generate_response_chatgpt(req['inputTranscript']))
+    if intent == 'NewConnectionIntent':
+        id = 'ORD-'+str(uuid.uuid1())[:3]
+        save_order(req,str(id))
+        return reply_close(req,"Your requset process succesfully. \n\n Your Order id is "+str(id)+".")
+    if intent == 'SlowSpeedIntent':
+        id = 'TT-'+str(uuid.uuid1())[:3]
+        create_fault(req,str(id))
+        return reply_close(req,"Your requset process succesfully. \n\n Your Ticket id is "+str(id)+".")
+    if intent == 'InternetDownIntent':
+        id = 'TT-'+str(uuid.uuid1())[:3]
+        create_fault(req,str(id))
+        return reply_close(req,"Your requset process succesfully. \n\n Your Ticket id is "+str(id)+".")
+    if intent == 'OrderInfoIntent':
+        id = req['sessionState']['intent']['slots']['orderid']['value']['interpretedValue']
+        data = get_order(str(id))
+        if data['status'].get('S') == 'Under Process' :
+            return reply_close(req,"Your order is "+data['status'].get('S')+" and will be completed by "+data['ETA'].get('S')+". ")
+        else:
+            return reply_close(req,"Your order was "+data['status'].get('S')+" on "+data['ETA'].get('S')+". ")
+    if intent == 'TicketInfoIntent':
+        id = req['sessionState']['intent']['slots']['ticketid']['value']['interpretedValue']
+        data = get_ticket(str(id))
+        if data['status'].get('S') == 'Under Process' :
+            return reply_close(req,"Your ticket is "+data['status'].get('S')+" and will be completed by "+data['ETA'].get('S')+". ")
+        else:
+            return reply_close(req,"Your ticket was "+data['status'].get('S')+" on "+data['ETA'].get('S')+". ")
+    raise Exception('Intent with name ' + intent + ' not supported')
+
+
+def save_order(req,id):
+  data = client.put_item(
+    TableName='Order',
+    Item={
+        'id': {
+          'S': id
+        },
+        'cpr': {
+          'S': req['sessionState']['intent']['slots']['CPR']['value']['interpretedValue']
+        },
+        'status': {
+          'S': 'Under Process'
+        },
+        'ETA': {
+          'S': (today + DT.timedelta(days=7)).strftime('%m/%d/%Y')
+        }
+    }
+  )
+  
+def create_fault(req,id):
+  data = client.put_item(
+    TableName='Fault',
+    Item={
+        'id': {
+          'S': id
+        },
+        'problem': {
+          'S': req['sessionState']['intent']['name']
+        },
+        'status': {
+          'S': 'Under Process'
+        },
+        'ETA': {
+          'S': (today + DT.timedelta(days=1)).strftime('%m/%d/%Y')
+        }
+    }
+  )
+
+
+
+def get_order(id):
+  data = client.get_item(
+    TableName='Order',
+    Key={
+        'id': {
+          'S': id
+        }
+    }
+  )
+  print(json.dumps(data['Item']))
+  return data['Item']
+
+def get_ticket(id):
+  data = client.get_item(
+    TableName='Fault',
+    Key={
+        'id': {
+          'S': id
+        }
+    }
+  )
+  print(json.dumps(data['Item']))
+  return data['Item']
+
+
+
+def lambda_handler(event, context):
+    
+    print(event)
+    return execute(event)
